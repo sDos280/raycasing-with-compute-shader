@@ -1,0 +1,260 @@
+#version 430
+precision highp float;
+
+#define MIN(a, b) (((a)<(b))?(a):(b))
+#define RAYLENGTH 10000
+#define Ray2DCollisionInit Ray2DCollision(false, 0.0, vec2(0, 0), vec2(0, 0))
+#define rayAngleOffset (FOV / rayCount)
+#define LineSegmentsCount 1
+#define CirclesCount 1
+#define RectanglesCount 1
+
+// Shader Input Data structure
+struct InputData{
+    vec2 playerPosition;
+    float playerAngle;
+    float fov;
+    float raysCount;
+    float angleOffset;
+    int screenWidth;
+    int screenHeight;
+};
+
+// Shader Output OUT structure
+struct ShaderOutputData {
+    float height;
+    float color;
+};
+
+// LineSegment structure
+struct LineSegment {
+    vec2 point1;
+    vec2 point2;
+};
+
+// Circle structure
+struct Circle {
+    vec2 position;
+    float radius;
+};
+
+// Rectangle structure
+struct Rectangle {
+    float x;// Rectangle top-left corner position x
+    float y;// Rectangle top-left corner position y
+    float width;// Rectangle width
+    float height;// Rectangle height
+};
+
+// Ray2D, ray2D for ray-casting
+struct Ray2D {
+    vec2 position;// Ray position (origin)
+    vec2 direction;// Ray direction
+};
+
+// Ray2DCollision, ray2D hit information
+struct Ray2DCollision {
+    bool hit;// Did the ray hit something?
+    float distance;// Distance to nearest hit
+    vec2 point;// Point of nearest hit
+    vec2 normal;// Surface normal of hit
+};
+
+float Sign(float value);
+vec2 Vector2CrossProduct(vec2 v);
+Ray2DCollision GetRay2DCollisionLineSegment(Ray2D ray, vec2 p1, vec2 p2);
+Ray2DCollision GetRay2DCollisionRectangle(Ray2D ray, Rectangle rect);
+Ray2DCollision GetRay2DCollisionCircle(Ray2D ray, vec2 center, float radius);
+
+// Local compute unit size
+layout (local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// Input stuff
+layout(std430, binding = 1) readonly buffer InputDataLayout
+{
+    InputData inputData;
+};
+
+// Input stuff
+layout(std430, binding = 2) writeonly restrict buffer columnsHeightLayout
+{
+    ShaderOutputData columnsHeight[];
+};
+
+
+
+void main() {
+    uint rayIndex = gl_GlobalInvocationID.x;
+
+    LineSegment lineSegments[LineSegmentsCount];
+    lineSegments[0] = LineSegment(vec2(0, 0), vec2(100, 300));
+
+    Rectangle rectangles[RectanglesCount];
+    rectangles[0] = Rectangle(0, 0, inputData.screenWidth, inputData.screenHeight);
+
+    Circle circles[CirclesCount];
+    circles[0] = Circle(vec2(inputData.screenWidth * 0.5 + 200, inputData.screenHeight * 0.5), 50);
+
+
+    Ray2DCollision collision = Ray2DCollisionInit;
+    collision.distance = RAYLENGTH;
+
+    float useAngle = inputData.playerAngle - inputData.fov * 0.5f + inputData.angleOffset * rayIndex;
+
+    Ray2D ray = Ray2D(inputData.playerPosition, vec2(cos(useAngle), sin(useAngle)));
+
+    for (int i = 0; i < LineSegmentsCount; i++){
+        Ray2DCollision _collision = Ray2DCollisionInit;
+        _collision = GetRay2DCollisionLineSegment(ray, lineSegments[i].point1, lineSegments[i].point2);
+
+        if (_collision.hit && (collision.distance >= _collision.distance)) collision = _collision;
+    }
+
+    for (int i = 0; i < RectanglesCount; i++){
+        Ray2DCollision _collision = Ray2DCollisionInit;
+        _collision = GetRay2DCollisionRectangle(ray, rectangles[i]);
+
+        if (_collision.hit && (collision.distance >= _collision.distance)) collision = _collision;
+    }
+
+    for (int i = 0; i < CirclesCount; i++){
+        Ray2DCollision _collision = Ray2DCollisionInit;
+        _collision = GetRay2DCollisionCircle(ray, circles[i].position, circles[i].radius);
+
+        if (_collision.hit && (collision.distance >= _collision.distance)) collision = _collision;
+    }
+
+    if (collision.hit){
+        columnsHeight[rayIndex].height = MIN(100 * (800 / (collision.distance * cos(inputData.playerAngle - useAngle)) + 0.0001f), 800);
+        columnsHeight[rayIndex].color =  1 / (collision.distance * collision.distance * 0.00001f + 1);
+    } else {
+        columnsHeight[rayIndex].height = 0;
+        columnsHeight[rayIndex].color = 0;
+    }
+
+    return;
+}
+
+// source: http://www.jeffreythompson.org/collision-detection/line-line.php
+// Get collision info between ray2d and a line segment
+Ray2DCollision GetRay2DCollisionLineSegment(Ray2D ray, vec2 p1, vec2 p2)
+{
+    Ray2DCollision collision = Ray2DCollisionInit;
+
+    vec2 rayEndPoint = ray.position + ray.direction * RAYLENGTH;
+
+    float uADenominator = (p2.y - p1.y) * (ray.position.x - rayEndPoint.x) - (p2.x - p1.x) * (ray.position.y - rayEndPoint.y);
+    float uBDenominator = (p2.y - p1.y) * (ray.position.x - rayEndPoint.x) - (p2.x - p1.x) * (ray.position.y - rayEndPoint.y);
+    if (uADenominator != 0 && uBDenominator != 0) {
+        float uA = ((p2.x - p1.x) * (rayEndPoint.y - p1.y) - (p2.y - p1.y) * (rayEndPoint.x - p1.x)) / uADenominator;
+        float uB = ((ray.position.x - rayEndPoint.x) * (rayEndPoint.y - p1.y) - (ray.position.y - rayEndPoint.y) * (rayEndPoint.x - p1.x)) / uBDenominator;
+        if (uA >= 0 && uA <= 1 && uB >= 0 && uB <= 1) {
+            collision.hit = true;
+            collision.point = vec2(rayEndPoint.x + (uA * (ray.position.x - rayEndPoint.x)), rayEndPoint.y + (uA * (ray.position.y - rayEndPoint.y)));
+            collision.distance = length(collision.point - ray.position);
+            float OnWhichSide = Sign((ray.position.x - p1.x) * (-p2.y + p1.y) + (ray.position.y - p1.y) * (p2.x - p1.x));
+            if (OnWhichSide == 1) {
+                collision.normal = -Vector2CrossProduct(normalize(p1 - p2));
+            }
+            else if (OnWhichSide == -1) {
+                collision.normal = Vector2CrossProduct(normalize(p1 - p2));
+            }
+            /*else if (OnWhichSide == 0) {
+                // no normal, on the line
+            }*/
+        }
+        else
+        {
+            collision.hit = false;
+        }
+    }
+    else
+    {
+        collision.hit = false;
+    }
+
+    return collision;
+}
+
+// Get collision info between ray and Rectangle
+Ray2DCollision GetRay2DCollisionRectangle(Ray2D ray, Rectangle rect)
+{
+    Ray2DCollision edgesCollision[4];
+    edgesCollision[0] = GetRay2DCollisionLineSegment(ray, vec2(rect.x, rect.y), vec2(rect.x + rect.width, rect.y));
+    edgesCollision[1] = GetRay2DCollisionLineSegment(ray, vec2(rect.x + rect.width, rect.y), vec2(rect.x + rect.width, rect.y + rect.height));
+    edgesCollision[2] = GetRay2DCollisionLineSegment(ray, vec2(rect.x, rect.y), vec2(rect.x, rect.y + rect.height));
+    edgesCollision[3] = GetRay2DCollisionLineSegment(ray, vec2(rect.x, rect.y + rect.height), vec2(rect.x + rect.width, rect.y + rect.height));
+
+
+    Ray2DCollision collision = Ray2DCollisionInit;
+    collision.distance = RAYLENGTH;
+
+    for (int i = 0; i < 4; i++) {
+        if (edgesCollision[i].hit)
+        {
+            // Save the closest hit edge
+            if (edgesCollision[i].hit && collision.distance >= edgesCollision[i].distance) collision = edgesCollision[i];
+        }
+    }
+
+    return collision;
+}
+
+
+// source: https://www.bluebill.net/circle_ray_intersection.html
+// Get collision info between ray2d and circle
+Ray2DCollision GetRay2DCollisionCircle(Ray2D ray, vec2 center, float radius)
+{
+    Ray2DCollision collision = Ray2DCollisionInit;
+
+    vec2 u = center - ray.position;
+    float temp = dot(u, ray.direction);
+    vec2 u1 = ray.direction * temp;
+    vec2 u2 = u - u1;
+
+    float d = length(u2);
+
+    collision.hit = d <= radius && (temp > 0.0 || u.x * u.x + u.y * u.y < radius * radius);
+
+    float m = sqrt(radius * radius - d * d);
+
+    // Check if ray origin is inside the circle to calculate the correct collision point
+    if (length(u) > radius)
+    {
+        vec2 p2 = ray.position + u1 + ray.direction * -m;
+
+        collision.distance = length(p2 - ray.position);
+
+        // Calculate collision point
+        collision.point = p2;
+
+        // Calculate collision normal (pointing outwards)
+        collision.normal = normalize(collision.point - center);
+    }
+    else
+    {
+        vec2 p1 = ray.position + u1 + ray.direction * m;
+
+        collision.distance = length(p1 - ray.position);
+
+        // Calculate collision point
+        collision.point = p1;
+
+        // Calculate collision normal (pointing outwards)
+        collision.normal = -normalize(collision.point - center);
+    }
+
+    return collision;
+}
+
+float Sign(float value)
+{
+    if (value > 0.0f) return 1.0f;
+    if (value < 0.0f) return -1.0f;
+    return 0.0f;
+}
+
+vec2 Vector2CrossProduct(vec2 v)
+{
+    return vec2(-v.y, v.x);
+}
